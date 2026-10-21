@@ -1,8 +1,7 @@
-"""Клиент Playerok: слушает чаты и отвечает покупателям.
+"""Клиент Playerok: REST-polling чатов вместо WebSocket.
 
-Работает через неофициальную библиотеку PlayerokAPI (авторизация cookie).
-Весь ввод-вывод с площадкой изолирован здесь, чтобы легко заменить способ
-подключения, если Playerok что-то поменяет.
+Поскольку в playerokapi нет встроенного EventListener,
+реализуем polling через get_chats() + get_chat_messages().
 """
 from __future__ import annotations
 
@@ -15,6 +14,7 @@ from .config import Config
 
 log = logging.getLogger("bot.playerok")
 
+POLL_INTERVAL = 10
 RECONNECT_DELAY = 15
 
 
@@ -22,11 +22,11 @@ RECONNECT_DELAY = 15
 class BuyerMessage:
     """Одно сообщение покупателя в чате."""
 
-    chat_id: object
-    user_id: object
-    username: object
+    chat_id: str
+    user_id: str
+    username: str | None
     text: str
-    message_id: object
+    message_id: str | None
 
 
 class PlayerokClient:
@@ -43,10 +43,10 @@ class PlayerokClient:
             cookies=self._cfg.playerok_cookies,
             user_agent=self._cfg.playerok_user_agent,
         ).get()
-        self.my_id = getattr(self._acc, "id", None)
+        self.my_id = str(self._acc.id)
         log.info("Playerok: вошли, id аккаунта = %s", self.my_id)
 
-    def send(self, chat_id, text: str) -> bool:
+    def send(self, chat_id: str, text: str) -> bool:
         try:
             self._acc.send_message(chat_id=chat_id, text=text)
             return True
@@ -55,51 +55,91 @@ class PlayerokClient:
             return False
 
     def events(self) -> Iterator[BuyerMessage]:
-        """Бесконечный поток сообщений покупателя с переподключением."""
-        from playerokapi.enums import EventTypes
-        from playerokapi.listener.listener import EventListener
+        """Бесконечный поллинг: get_chats -> get_chat_messages."""
+        last_seen: dict[str, str] = {}  # chat_id -> last_message_id
 
         while True:
             try:
                 if self._acc is None:
                     self.connect()
-                listener = EventListener(self._acc)
-                log.info("Слушаю чаты Playerok...")
-                for event in listener.listen():
-                    message = self._normalize(event, EventTypes)
-                    if message is not None:
-                        yield message
+
+                chats = self._acc.get_chats(count=24)
+                if chats and hasattr(chats, "chats"):
+                    for chat in chats.chats:
+                        chat_id = getattr(chat, "id", None)
+                        if not chat_id:
+                            continue
+                        chat_id = str(chat_id)
+
+                        # Пропускаем чат с моим id (собственные сообщения)
+                        if getattr(chat, "user", None):
+                            try:
+                                uid = str(getattr(chat.user, "id", ""))
+                                if uid == self.my_id:
+                                    continue
+                            except Exception:
+                                pass
+
+                        # Получаем новые сообщения
+                        try:
+                            msgs = self._acc.get_chat_messages(
+                                chat_id=chat_id, count=24
+                            )
+                        except Exception as exc:
+                            log.warning("get_chat_messages %s: %s", chat_id, exc)
+                            continue
+
+                        if not msgs or not hasattr(msgs, "messages"):
+                            continue
+
+                        for msg in msgs.messages:
+                            msg_id = str(getattr(msg, "id", ""))
+                            if not msg_id:
+                                continue
+
+                            # Пропускаем уже обработанные
+                            if msg_id == last_seen.get(chat_id):
+                                continue
+
+                            # Пропускаем наши сообщения
+                            try:
+                                sender = getattr(msg, "sender", None) or getattr(msg, "user", None)
+                                if sender:
+                                    sid = str(getattr(sender, "id", ""))
+                                    if sid == self.my_id:
+                                        continue
+                            except Exception:
+                                pass
+
+                            text = getattr(msg, "text", None)
+                            if not text or not str(text).strip():
+                                continue  # пустые / вложения
+
+                            username = None
+                            try:
+                                sender = getattr(msg, "sender", None) or getattr(msg, "user", None)
+                                if sender:
+                                    username = getattr(sender, "username", None)
+                            except Exception:
+                                pass
+
+                            last_seen[chat_id] = msg_id
+                            yield BuyerMessage(
+                                chat_id=chat_id,
+                                user_id=str(getattr(msg, "sender_id", chat_id)),
+                                username=username,
+                                text=str(text),
+                                message_id=msg_id,
+                            )
             except GeneratorExit:
                 raise
             except Exception as exc:
                 log.warning(
-                    "Playerok: поток событий оборвался (%s), переподключение через %s с",
+                    "Playerok: поллинг упал (%s), переподключение через %s с",
                     exc,
                     RECONNECT_DELAY,
                 )
                 self._acc = None
                 time.sleep(RECONNECT_DELAY)
 
-    def _normalize(self, event, event_types) -> BuyerMessage | None:
-        if getattr(event, "type", None) is not event_types.NEW_MESSAGE:
-            return None
-
-        message = getattr(event, "message", None) or event
-        user = getattr(message, "user", None)
-        user_id = getattr(user, "id", None)
-        if self.my_id is not None and user_id == self.my_id:
-            return None  # наше же сообщение
-
-        text = getattr(message, "text", None)
-        if not text or not str(text).strip():
-            return None  # пустые сообщения и вложения игнорируем
-
-        chat = getattr(event, "chat", None)
-        chat_id = getattr(chat, "id", None) or user_id
-        return BuyerMessage(
-            chat_id=chat_id,
-            user_id=user_id,
-            username=getattr(user, "username", None),
-            text=str(text),
-            message_id=getattr(message, "id", None),
-        )
+            time.sleep(POLL_INTERVAL)
