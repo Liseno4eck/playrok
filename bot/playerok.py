@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import time
 from dataclasses import dataclass
 from typing import Iterator
@@ -16,6 +18,25 @@ log = logging.getLogger("bot.playerok")
 
 POLL_INTERVAL = 10
 RECONNECT_DELAY = 15
+
+
+def ensure_cacert() -> None:
+    """playerokapi ищет cacert.pem внутри своей папки, но не кладёт его туда.
+
+    Копируем системный набор корневым сертификатов (certifi) под нужным именем.
+    """
+    try:
+        import playerokapi
+
+        target = os.path.join(os.path.dirname(playerokapi.__file__), "cacert.pem")
+        if os.path.exists(target):
+            return
+        import certifi
+
+        shutil.copyfile(certifi.where(), target)
+        log.info("Создан файл сертификатов: %s", target)
+    except Exception as exc:
+        log.warning("Не удалось подготовить cacert.pem: %s", exc)
 
 
 @dataclass
@@ -36,6 +57,7 @@ class PlayerokClient:
         self.my_id = None
 
     def connect(self) -> None:
+        ensure_cacert()
         from playerokapi.account import Account
 
         log.info("Вход в Playerok...")
