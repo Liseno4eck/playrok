@@ -1,0 +1,35 @@
+name: Bot 24/7
+
+on:
+  schedule:
+    - cron: "*/40 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: playerok-bot-live
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          PLAYEROK_COOKIES: ${{ secrets.PLAYEROK_COOKIES }}
+          PLAYEROK_USER_AGENT: ${{ secrets.PLAYEROK_USER_AGENT }}
+          VK_GROUP_TOKEN: ${{ secrets.VK_GROUP_TOKEN }}
+          VK_SELLER_USER_IDS: ${{ secrets.VK_SELLER_USER_IDS }}
+        run: python main.py

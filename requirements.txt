@@ -1,0 +1,5 @@
+# Базовые зависимости
+vk-api==11.9.9
+
+# Неофициальный API Playerok
+playerokapi @ git+https://github.com/alleexxeeyy/PlayerokAPI.git
